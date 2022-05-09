@@ -1,0 +1,310 @@
+# RouterOS script name : SurfsharkWGKeysRenew
+# Author : DrunkestCoder (https://github.com/DrunkestCoder)
+# Creation date : 2022/April/23
+# Tested on: RouterOS 7.2.3 / multiple HW devices
+# policy : read, write, policy, test
+
+/system script run "JParseFunctions";
+:global JSONLoad; :global JSONLoads; :global JSONUnload;
+
+:global SurfsharkAuthToken;
+:global SurfsharkUserAgent "Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/99.0";
+
+# ShurfShark login and password
+:local SurfsharkLogin "login"
+:local SurfsharkPassword "password"
+
+# If yours key not registered yet, set this parameter to "False", it is necessary for first start only!
+:global SurfsharkKeysRegistered "True";
+:global SurfsharkKeysRegistered "False";
+
+# Public keys your WireGuard connections. It should have 44 characters or more. Array should contain minimum one key.
+:local PublicKeys {"5lolQWrIfz1q8EV8iPzw37qSNuvpq/w0UOeIs8FunVs="}
+:local PublicKeys {"PjxDOC5KhgjmobFyZ53d2f0FXUmvRi84O3rNax3pzEI="; "oIIU43BKYsTImOxOST2OoXDxjUBdknK66UJE4YNE7CM="; "PSgO7Ezlr5H/6V0YQYBKbZR24J4onEID8SMz+7RJSFs="}
+
+:global doExit do={
+	:global JSONUnload;
+	:global SurfsharkKeysRegistered;
+	:global SurfsharkUserAgent;
+	$JSONUnload
+	/system script environment remove [find name="SurfsharkKeysRegistered"]
+	/system script environment remove [find name="SurfsharkUserAgent"]
+	/system script environment remove [find name="doExit"]
+	exit
+}
+
+:local getToken do={
+	:global JSONLoad; :global JSONLoads;
+	:global doExit;
+	:global SurfsharkAuthToken;
+	:global SurfsharkUserAgent;
+	:local SurfsharkLogin "$1"
+	:local SurfsharkPassword "$2"
+	:local authorizationToken "empty"
+	:do {
+		:local response [/tool fetch url=("https://api.surfshark.com/v1/auth/login") http-header-field="content-type:application/json, User-Agent: $SurfsharkUserAgent" http-data=("{\"username\":\"$SurfsharkLogin\", \"password\":\"$SurfsharkPassword\"}") mode=https http-method=post as-value output=user]
+		:if ($response->"status" = "finished") do={
+			:local responseRawData (:return $response->"data")
+			:local responseToken (:return [$JSONLoads $responseRawData]->"token")
+			:set SurfsharkAuthToken $responseToken
+			:set authorizationToken value=[$responseToken]
+		} else {
+			:log error ("Error while getting token, can't connect to API server!")
+			$doExit
+		}
+	} on-error={
+		:log error ("Error while getting token, probable login or password incorrect / you have temporary banned!")
+		$doExit
+	}
+	:return ($authorizationToken)
+}
+
+:local getRegistration do={
+	:global doExit;
+	:global SurfsharkAuthToken;
+	:global SurfsharkUserAgent;
+	:local publicKeys "$1"
+	:local registrationStatus
+	:if ( [:len $SurfsharkAuthToken] > 36) do={
+		:if ( [:typeof $publicKeys] = "array" ) do={
+			:local keysCount [:len $publicKeys]
+			:local RegistratedStatusFailedCount 0
+			:foreach publicKey in=$publicKeys do={
+				:delay 6s
+				:do {
+					:local response [/tool fetch url=("https://api.surfshark.com/v1/account/users/public-keys") http-header-field="content-type:application/json, User-Agent: $SurfsharkUserAgent, authorization: Bearer $SurfsharkAuthToken" http-data=("{\"pubKey\": \"$publicKey\"}") mode=https http-method=post as-value output=user]
+					:local responseRawData (:return $response->"data")
+					:if ($response->"status" = "finished") do={
+						:set registrationStatus ($registrationStatus, $responseRawData)
+					} else {
+						:log error ("getRegistration:: response status not finished")
+					}
+				} on-error={
+					:local errorMessage "{\"error\": \"true\",\"pubKey\": \"$publicKey\"}"
+					:set registrationStatus ($registrationStatus, $errorMessage)
+					:set $RegistratedStatusFailedCount ($RegistratedStatusFailedCount + 1)
+				}
+			}
+			:if ( $keysCount = $RegistratedStatusFailedCount ) do {
+				:set registrationStatus "TokenExpired"
+			}
+		} else {
+			:log error ("PublicKeys variable is not a array!")
+			$doExit
+		}
+		:return ($registrationStatus)
+	}
+}
+
+:local getValidation do={
+	:global doExit;
+	:global SurfsharkAuthToken;
+	:global SurfsharkUserAgent;
+	:local publicKeys "$1"
+	:local validationStatus
+	:if ( [:len $SurfsharkAuthToken] > 36) do={
+		:if ( [:typeof $publicKeys] = "array" ) do={
+			:local keysCount [:len $publicKeys]
+			:local ValidatedStatusFailedCount 0
+			:foreach publicKey in=$publicKeys do={
+				:delay 6s
+				:do {
+					:local response [/tool fetch url=("https://api.surfshark.com/v1/account/users/public-keys/validate") http-header-field="content-type:application/json, User-Agent: $SurfsharkUserAgent, authorization: Bearer $SurfsharkAuthToken" http-data=("{\"pubKey\": \"$publicKey\"}") mode=https http-method=post as-value output=user]
+					:local responseRawData (:return $response->"data")
+					:if ($response->"status" = "finished") do={
+						:set validationStatus ($validationStatus, $responseRawData)
+					} else {
+						:log error ("getValidation response status not finished")
+						:set validationStatus "Failed"
+					}
+				} on-error={
+					:local errorMessage "{\"error\": \"true\",\"pubKey\": \"$publicKey\"}"
+					:set validationStatus ($validationStatus, $errorMessage)
+					:set $ValidatedStatusFailedCount ($ValidatedStatusFailedCount + 1)
+				}
+			}
+			:if ( $keysCount = $ValidatedStatusFailedCount ) do {
+				:set validationStatus "TokenExpired"
+			}
+		} else {
+			:log error ("PublicKeys variable is not a array!")
+			$doExit
+		}
+		:return ($validationStatus)
+	}
+}
+
+:if ( [:len $SurfsharkAuthToken] > 36) do={
+	:if ( $SurfsharkKeysRegistered = "False" ) do={
+		:local RegisteredStatus value=[$getRegistration [:put (:tostr $PublicKeys)]]
+		:if ( $RegisteredStatus != "Failed" ) do={
+			:if ( $RegisteredStatus != "TokenExpired" ) do={
+				:if ( [:typeof $RegisteredStatus] = "array" ) do={
+					:foreach keyStatus in=$RegisteredStatus do={
+						:if ( [$JSONLoads $keyStatus]->"error" != "true" ) do={
+							:local expiresAt (:return [$JSONLoads $keyStatus]->"expiresAt")
+							:local pubKey (:return [$JSONLoads $keyStatus]->"pubKey")
+							:log warning "Public key '$pubKey' was registered and will be expired $expiresAt"
+						} else {
+							:local pubKey (:return [$JSONLoads $keyStatus]->"pubKey")
+							:log error ("Key ->$pubKey<- possible already registered!")
+						}
+					}
+					:log error ("Keys are registered, set SurfsharkKeysRegistered to True")
+					$doExit
+				}
+			} else {
+				:set SurfsharkAuthToken "Expired"
+			}
+		} else {
+			:log error ("Error while registering, can't connect to API server!")
+			$doExit
+		}
+	}
+
+	:if ( $SurfsharkKeysRegistered = "True" ) do={
+		:local ValidatedStatus value=[$getValidation [:put (:tostr $PublicKeys)]]
+		:if ( $ValidatedStatus != "Failed" ) do={
+			:if ( $ValidatedStatus != "TokenExpired" ) do={
+				:if ( [:typeof $ValidatedStatus] = "array" ) do={
+					:foreach keyStatus in=$ValidatedStatus do={
+						:if ( [$JSONLoads $keyStatus]->"error" != "true" ) do={
+							:local expiresAt (:return [$JSONLoads $keyStatus]->"expiresAt")
+							:local pubKey (:return [$JSONLoads $keyStatus]->"pubKey")
+							:log warning "Public key '$pubKey' will be expired $expiresAt"
+						} else {
+							:local pubKey (:return [$JSONLoads $keyStatus]->"pubKey")
+							:log error ("Key $pubKey not validated, possible he isn't registered!")
+						}
+					}
+				}
+			} else {
+				:set SurfsharkAuthToken "Expired"
+			}
+		} else {
+			:log error ("Error while validating, can't connect to API server!")
+			$doExit
+		}
+	}
+}
+:if ( $SurfsharkAuthToken = "Expired" ) do={
+	:local AuthToken value=[$getToken [:put (:tostr $SurfsharkLogin)] [:put (:tostr $SurfsharkPassword)]]
+	:if ( $AuthToken != "empty" ) do={
+		:if ( $SurfsharkKeysRegistered = "False" ) do={
+			:local RegisteredStatus value=[$getRegistration [:put (:tostr $PublicKeys)]]
+			:if ( $RegisteredStatus != "Failed" ) do={
+				:if ( $RegisteredStatus != "TokenExpired" ) do={
+					:if ( [:typeof $RegisteredStatus] = "array" ) do={
+						:foreach keyStatus in=$RegisteredStatus do={
+							:if ( [$JSONLoads $keyStatus]->"error" != "true" ) do={
+								:local expiresAt (:return [$JSONLoads $keyStatus]->"expiresAt")
+								:local pubKey (:return [$JSONLoads $keyStatus]->"pubKey")
+								:log warning "Key $pubKey will be expired $expiresAt"
+							} else {
+								:local pubKey (:return [$JSONLoads $keyStatus]->"pubKey")
+								:log error ("Key ->$pubKey<- possible already registered!")
+							}
+						}
+						:log error ("Keys are registered, set SurfsharkKeysRegistered to True")
+						$doExit
+					}
+				} else {
+					# At this point, we break the circle when the keys are possibly already registered, and it is worth stopping trying
+					:log error ("Probably keys are registered, set SurfsharkKeysRegistered to True")
+					$doExit
+				}
+			} else {
+				:log error ("Error while registering, can't connect to API server!")
+				$doExit
+			}
+		}
+
+		:if ( $SurfsharkKeysRegistered = "True" ) do={
+			:local ValidatedStatus value=[$getValidation [:put (:tostr $PublicKeys)]]
+			:if ( $ValidatedStatus != "Failed" ) do={
+				:if ( $ValidatedStatus != "TokenExpired" ) do={
+					:if ( [:typeof $ValidatedStatus] = "array" ) do={
+						:foreach keyStatus in=$ValidatedStatus do={
+							:if ( [$JSONLoads $keyStatus]->"error" != "true" ) do={
+								:local expiresAt (:return [$JSONLoads $keyStatus]->"expiresAt")
+								:local pubKey (:return [$JSONLoads $keyStatus]->"pubKey")
+								:log warning "Public key '$pubKey' will be expired $expiresAt"
+							} else {
+								:local pubKey (:return [$JSONLoads $keyStatus]->"pubKey")
+								:log error ("Key $pubKey not validated, possible he isn't registered!")
+							}
+						}
+					}
+				} else {
+					:set SurfsharkAuthToken "Expired"
+				}
+			} else {
+				:log error ("Error while validating, can't connect to API server!")
+				$doExit
+			}
+		}
+	} else {
+		:log error ("Error while requesting new token, try again later!")
+	}
+	
+}
+
+:if ( [:len $SurfsharkAuthToken] = 0 ) do={
+	:local AuthToken value=[$getToken [:put (:tostr $SurfsharkLogin)] [:put (:tostr $SurfsharkPassword)]]
+	:if ( $AuthToken != "empty" ) do={
+		:if ( $SurfsharkKeysRegistered = "False" ) do={
+			:local RegisteredStatus value=[$getRegistration [:put (:tostr $PublicKeys)]]
+			:if ( $RegisteredStatus != "Failed" ) do={
+				:if ( $RegisteredStatus != "TokenExpired" ) do={
+					:if ( [:typeof $RegisteredStatus] = "array" ) do={
+						:foreach keyStatus in=$RegisteredStatus do={
+							:if ( [$JSONLoads $keyStatus]->"error" != "true" ) do={
+								:local expiresAt (:return [$JSONLoads $keyStatus]->"expiresAt")
+								:local pubKey (:return [$JSONLoads $keyStatus]->"pubKey")
+								:log warning "Key $pubKey will be expired $expiresAt"
+							} else {
+								:local pubKey (:return [$JSONLoads $keyStatus]->"pubKey")
+								:log error ("Key ->$pubKey<- possible already registered!")
+							}
+						}
+						:log error ("Keys are registered, set SurfsharkKeysRegistered to True")
+						$doExit
+					}
+				} else {
+					:set SurfsharkAuthToken "Expired"
+				}
+			} else {
+				:log error ("Error while registering, can't connect to API server!")
+				$doExit
+			}
+		}
+
+		:if ( $SurfsharkKeysRegistered = "True" ) do={
+			:local ValidatedStatus value=[$getValidation [:put (:tostr $PublicKeys)]]
+			:if ( $ValidatedStatus != "Failed" ) do={
+				:if ( $ValidatedStatus != "TokenExpired" ) do={
+					:if ( [:typeof $ValidatedStatus] = "array" ) do={
+						:foreach keyStatus in=$ValidatedStatus do={
+							:if ( [$JSONLoads $keyStatus]->"error" != "true" ) do={
+								:local expiresAt (:return [$JSONLoads $keyStatus]->"expiresAt")
+								:local pubKey (:return [$JSONLoads $keyStatus]->"pubKey")
+								:log warning "Public key '$pubKey' will be expired $expiresAt"
+							} else {
+								:local pubKey (:return [$JSONLoads $keyStatus]->"pubKey")
+								:log error ("Key $pubKey not validated, possible he isn't registered!")
+							}
+						}
+					}
+				} else {
+					:set SurfsharkAuthToken "Expired"
+				}
+			} else {
+				:log error ("Error while validating, can't connect to API server!")
+				$doExit
+			}
+		}
+	} else {
+		:log error ("Error while requesting the new token, try again later!")
+	}
+}
+$doExit
